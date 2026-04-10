@@ -70,20 +70,28 @@ Edit [configs/mini_vla_egodex.yaml](/home/caiyy/codefield/VLA/H_RDT/configs/mini
 
 Recommended first-run settings:
 
-- `model.obs_cond_dim: 256`
-- `model.unet_down_dims: [128, 256, 512]`
+- `model.obs_cond_dim: 384`
+- `model.unet_down_dims: [256, 512, 1024]`
 - `common.action_chunk_size: 8`
 - `dataset.image_size: 224`
-- `train.train_batch_size: 8` or `16`
+- `train.train_batch_size`: per-GPU batch size
+- `global batch size = train_batch_size * num_gpus * gradient_accumulation_steps`
+
+With the current default config:
+
+- `train.train_batch_size: 32`
+- `train.gradient_accumulation_steps: 4`
+- `num_gpus: 4`
+- Global batch size = `32 * 4 * 4 = 512`
 
 ## Launch
 
-Single node, multi-GPU:
+Single node, 4 GPUs:
 
 ```bash
 accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
-  --data_root /path/to/egodex \
+  --data_root /root/shared-nvme/egodex \
   --output_dir ./checkpoints/mini-egodex
 ```
 
@@ -100,7 +108,7 @@ Resume from a specific checkpoint:
 ```bash
 accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
-  --data_root /path/to/egodex \
+  --data_root /root/shared-nvme/egodex \
   --output_dir ./checkpoints/mini-egodex \
   --resume_from_checkpoint ./checkpoints/mini-egodex/checkpoint-2000
 ```
@@ -110,10 +118,19 @@ Resume from the latest checkpoint in `output_dir`:
 ```bash
 accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
-  --data_root /path/to/egodex \
+  --data_root /root/shared-nvme/egodex \
   --output_dir ./checkpoints/mini-egodex \
   --resume_from_checkpoint latest
 ```
+
+## Multi-GPU Behavior
+
+- Training uses `accelerate` data parallelism on a single node
+- `train.train_batch_size` is per process, which in your setup means per GPU
+- Each GPU keeps a full model replica
+- Data is sharded across GPUs by `accelerate.prepare(...)`
+- Gradients are synchronized automatically by DDP through `accelerate`
+- This is not model parallelism, FSDP, or DeepSpeed ZeRO
 
 ## Save Behavior
 
