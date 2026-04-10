@@ -45,8 +45,8 @@ train:
   lr_warmup_steps: 500
   lr_num_cycles: 1
   lr_power: 1.0
-  train_batch_size: 32
-  eval_batch_size: 32
+  train_batch_size: 8
+  eval_batch_size: 8
   use_epoch_training: true
   total_epochs: 100
   max_train_steps: 100000
@@ -55,7 +55,7 @@ train:
   eval_period: 500
   epoch_eval_freq: 1
   epoch_save_freq: 1
-  num_workers: 64
+  num_workers: 16
   gradient_accumulation_steps: 4
   mixed_precision: bf16
   max_grad_norm: 1.0

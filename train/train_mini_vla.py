@@ -127,31 +127,32 @@ def evaluate(accelerator, model, dataloader, weight_dtype):
     sample_mse_sum = 0.0
     count = 0
     for batch in dataloader:
-        states = batch["states"].to(accelerator.device, dtype=weight_dtype)
-        actions = batch["actions"].to(accelerator.device, dtype=weight_dtype)
-        images = batch["images"].to(accelerator.device, dtype=weight_dtype)
+        states = batch["states"].to(accelerator.device)
+        actions = batch["actions"].to(accelerator.device)
+        images = batch["images"].to(accelerator.device)
         lang_embeds = batch.get("lang_embeds")
         lang_attn_mask = batch.get("lang_attn_mask")
         if lang_embeds is not None:
-            lang_embeds = lang_embeds.to(accelerator.device, dtype=weight_dtype)
+            lang_embeds = lang_embeds.to(accelerator.device)
         if lang_attn_mask is not None:
             lang_attn_mask = lang_attn_mask.to(accelerator.device)
 
-        output = model(
-            states=states,
-            actions=actions,
-            images=images,
-            lang_tokens=lang_embeds,
-            lang_attn_mask=lang_attn_mask,
-            instructions=batch["instructions"],
-        )
-        pred_actions = model.sample_actions(
-            states=states,
-            images=images,
-            lang_tokens=lang_embeds,
-            lang_attn_mask=lang_attn_mask,
-            instructions=batch["instructions"],
-        )
+        with accelerator.autocast():
+            output = model(
+                states=states,
+                actions=actions,
+                images=images,
+                lang_tokens=lang_embeds,
+                lang_attn_mask=lang_attn_mask,
+                instructions=batch["instructions"],
+            )
+            pred_actions = model.sample_actions(
+                states=states,
+                images=images,
+                lang_tokens=lang_embeds,
+                lang_attn_mask=lang_attn_mask,
+                instructions=batch["instructions"],
+            )
         mse = torch.mean((pred_actions - actions) ** 2)
 
         gathered_loss = accelerator.gather_for_metrics(output.loss.detach().unsqueeze(0))
@@ -366,24 +367,25 @@ def main():
     while not stop_training and epoch < max_epochs:
         for batch in train_loader:
             with accelerator.accumulate(model):
-                states = batch["states"].to(accelerator.device, dtype=weight_dtype)
-                actions = batch["actions"].to(accelerator.device, dtype=weight_dtype)
-                images = batch["images"].to(accelerator.device, dtype=weight_dtype)
+                states = batch["states"].to(accelerator.device)
+                actions = batch["actions"].to(accelerator.device)
+                images = batch["images"].to(accelerator.device)
                 lang_embeds = batch.get("lang_embeds")
                 lang_attn_mask = batch.get("lang_attn_mask")
                 if lang_embeds is not None:
-                    lang_embeds = lang_embeds.to(accelerator.device, dtype=weight_dtype)
+                    lang_embeds = lang_embeds.to(accelerator.device)
                 if lang_attn_mask is not None:
                     lang_attn_mask = lang_attn_mask.to(accelerator.device)
 
-                output = model(
-                    states=states,
-                    actions=actions,
-                    images=images,
-                    lang_tokens=lang_embeds,
-                    lang_attn_mask=lang_attn_mask,
-                    instructions=batch["instructions"],
-                )
+                with accelerator.autocast():
+                    output = model(
+                        states=states,
+                        actions=actions,
+                        images=images,
+                        lang_tokens=lang_embeds,
+                        lang_attn_mask=lang_attn_mask,
+                        instructions=batch["instructions"],
+                    )
                 accelerator.backward(output.loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), config["train"]["max_grad_norm"])

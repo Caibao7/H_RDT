@@ -79,10 +79,10 @@ Recommended first-run settings:
 
 With the current default config:
 
-- `train.train_batch_size: 32`
+- `train.train_batch_size: 8`
 - `train.gradient_accumulation_steps: 4`
 - `num_gpus: 4`
-- Global batch size = `32 * 4 * 4 = 512`
+- Global batch size = `8 * 4 * 4 = 128`
 
 ## Launch
 
