@@ -131,6 +131,7 @@ def main():
         upsample_rate=config["dataset"]["upsample_rate"],
         use_precomp_lang_embed=config["dataset"]["use_precomp_lang_embed"],
         stats_path=config["dataset"]["stats_path"],
+        lang_embed_root=config["dataset"].get("lang_embed_root"),
     )
     val_dataset = MiniEgoDexDataset(
         data_root=data_root,
@@ -140,6 +141,7 @@ def main():
         upsample_rate=config["dataset"]["upsample_rate"],
         use_precomp_lang_embed=config["dataset"]["use_precomp_lang_embed"],
         stats_path=config["dataset"]["stats_path"],
+        lang_embed_root=config["dataset"].get("lang_embed_root"),
     )
     collator = MiniEgoDexCollator()
 

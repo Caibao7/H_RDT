@@ -40,8 +40,16 @@ Use the existing preprocessing scripts:
 ```bash
 python datasets/pretrain/precompute_48d_actions.py --data_root /path/to/egodex
 python datasets/pretrain/calc_stat.py --data_root /path/to/egodex
-python datasets/pretrain/encode_lang_batch.py
+python datasets/pretrain/encode_lang_batch.py \
+  --data_root /path/to/egodex \
+  --model_path google-t5/t5-small \
+  --config_path configs/mini_vla_egodex.yaml \
+  --num_gpus 4 \
+  --processes_per_gpu 1 \
+  --output_root /path/to/egodex_t5_small_embeds
 ```
+
+If you want to overwrite the existing per-episode `.pt` files in-place instead, omit `--output_root` and add `--force_overwrite`.
 
 Important:
 
@@ -55,6 +63,7 @@ Edit [configs/mini_vla_egodex.yaml](/home/caiyy/codefield/VLA/H_RDT/configs/mini
 
 - `dataset.data_root`: EgoDex root
 - `dataset.stats_path`: path to `egodex_stat.json`
+- `dataset.lang_embed_root`: optional alternate root for precomputed language embeddings
 - `train.output_dir`: checkpoint directory
 - `train.report_to`: `none`, `wandb`, `tensorboard`, or `all`
 - `model.text.use_online_text_encoder`: `false` for cached embeddings during training, `true` to encode raw text online

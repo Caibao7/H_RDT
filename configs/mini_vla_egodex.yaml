@@ -9,6 +9,7 @@ dataset:
   upsample_rate: 3
   stats_path: datasets/pretrain/egodex_stat.json
   data_root: /path/to/egodex
+  lang_embed_root: null
   use_precomp_lang_embed: true
 
 model:

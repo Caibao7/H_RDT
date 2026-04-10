@@ -16,7 +16,7 @@ sys.path.append(PROJECT_ROOT)
 from models.encoder.t5_encoder import T5Embedder
 
 
-def collect_all_files(target_dir: str, force_overwrite: bool):
+def collect_all_files(target_dir: str, force_overwrite: bool, output_root: str | None):
     all_files = []
     dataset_dirs = []
     for item in os.listdir(target_dir):
@@ -36,7 +36,13 @@ def collect_all_files(target_dir: str, force_overwrite: bool):
             for hdf5_file in hdf5_files:
                 hdf5_path = os.path.join(task_dir, hdf5_file)
                 file_index = hdf5_file.split(".")[0]
-                pt_path = os.path.join(task_dir, f"{file_index}.pt")
+                if output_root is None:
+                    pt_path = os.path.join(task_dir, f"{file_index}.pt")
+                else:
+                    relative_dir = os.path.relpath(task_dir, target_dir)
+                    output_dir = os.path.join(output_root, relative_dir)
+                    os.makedirs(output_dir, exist_ok=True)
+                    pt_path = os.path.join(output_dir, f"{file_index}.pt")
                 if force_overwrite or not os.path.exists(pt_path):
                     all_files.append(
                         {
@@ -181,6 +187,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, default="google-t5/t5-small")
     parser.add_argument("--config_path", type=str, default=os.environ.get("HRDT_CONFIG_PATH", os.path.join(PROJECT_ROOT, "configs/mini_vla_egodex.yaml")))
     parser.add_argument("--max_length", type=int, default=None)
+    parser.add_argument("--output_root", type=str, default=None)
     parser.add_argument("--num_gpus", type=int, default=int(os.environ.get("NUM_GPUS", 1)))
     parser.add_argument("--processes_per_gpu", type=int, default=int(os.environ.get("PROCESSES_PER_GPU", 1)))
     parser.add_argument("--local_files_only", action="store_true", default=False)
@@ -194,7 +201,7 @@ def main():
     total_processes = max(args.num_gpus * args.processes_per_gpu, 1)
 
     print("Collecting EgoDex files for language encoding...")
-    all_files = collect_all_files(args.data_root, force_overwrite=args.force_overwrite)
+    all_files = collect_all_files(args.data_root, force_overwrite=args.force_overwrite, output_root=args.output_root)
     if args.test_mode:
         all_files = all_files[:10]
 
@@ -204,6 +211,7 @@ def main():
 
     print(f"Model: {args.model_path}")
     print(f"Data root: {args.data_root}")
+    print(f"Output root: {args.output_root or '[next to hdf5]'}")
     print(f"Files to process: {len(all_files)}")
     print(f"Processes: {total_processes} ({args.num_gpus} GPU x {args.processes_per_gpu} proc/GPU)")
 

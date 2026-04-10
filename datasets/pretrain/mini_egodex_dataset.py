@@ -25,6 +25,7 @@ class MiniEgoDexDataset(Dataset):
         upsample_rate: int = 3,
         use_precomp_lang_embed: bool = True,
         stats_path: str | None = None,
+        lang_embed_root: str | None = None,
     ) -> None:
         super().__init__()
         self.data_root = Path(data_root)
@@ -33,6 +34,7 @@ class MiniEgoDexDataset(Dataset):
         self.upsample_rate = upsample_rate
         self.use_precomp_lang_embed = use_precomp_lang_embed
         self.image_transform = image_transform or transforms.ToTensor()
+        self.lang_embed_root = Path(lang_embed_root) if lang_embed_root else None
 
         self.action_chunk_size = config["common"]["action_chunk_size"]
         self.img_history_size = config["common"]["img_history_size"]
@@ -70,7 +72,11 @@ class MiniEgoDexDataset(Dataset):
                 for hdf5_path in sorted(task_dir.glob("*.hdf5")):
                     stem = hdf5_path.stem
                     mp4_path = task_dir / f"{stem}.mp4"
-                    pt_path = task_dir / f"{stem}.pt"
+                    if self.lang_embed_root is None:
+                        pt_path = task_dir / f"{stem}.pt"
+                    else:
+                        relative_task_dir = task_dir.relative_to(self.data_root)
+                        pt_path = self.lang_embed_root / relative_task_dir / f"{stem}.pt"
                     if not mp4_path.exists():
                         continue
                     episodes.append(
