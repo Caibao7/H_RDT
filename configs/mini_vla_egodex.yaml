@@ -1,0 +1,51 @@
+common:
+  img_history_size: 1
+  action_chunk_size: 8
+  state_dim: 48
+  action_dim: 48
+
+dataset:
+  image_size: 224
+  upsample_rate: 3
+  stats_path: datasets/pretrain/egodex_stat.json
+  data_root: /path/to/egodex
+  use_precomp_lang_embed: true
+
+model:
+  obs_cond_dim: 256
+  num_train_timesteps: 100
+  num_inference_steps: 20
+  diffusion_step_embed_dim: 128
+  unet_down_dims: [128, 256, 512]
+  kernel_size: 5
+  n_groups: 8
+  vision:
+    model_name_or_path: google/siglip-base-patch16-224
+    pretrained: true
+    freeze: true
+    num_tokens: 16
+  text:
+    use_online_text_encoder: false
+    model_name_or_path: google-t5/t5-small
+    pretrained: true
+    freeze: true
+    max_length: 128
+    precomputed_dim: 512
+
+train:
+  output_dir: checkpoints/mini-egodex
+  logging_dir: logs
+  report_to: none
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  train_batch_size: 16
+  eval_batch_size: 16
+  max_train_steps: 100000
+  checkpointing_period: 2000
+  checkpoints_total_limit: 10
+  eval_period: 500
+  num_workers: 8
+  gradient_accumulation_steps: 1
+  mixed_precision: bf16
+  max_grad_norm: 1.0
+  seed: 42
