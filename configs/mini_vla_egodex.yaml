@@ -47,7 +47,7 @@ train:
   lr_power: 1.0
   train_batch_size: 32
   eval_batch_size: 32
-  use_epoch_training: false
+  use_epoch_training: true
   total_epochs: 100
   max_train_steps: 100000
   checkpointing_period: 2000
