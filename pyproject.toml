@@ -11,7 +11,7 @@ dependencies = [
   "huggingface-hub[cli]==0.25.0",
   "imgaug==0.4.0",
   "numpy==1.26.4",
-  "opencv-python==4.10.0.84",
+  "opencv-python-headless==4.10.0.84",
   "packaging==24.0",
   "pandas==2.2.3",
   "pillow>=10.0.0",
