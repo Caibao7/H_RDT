@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 from pathlib import Path
 
@@ -14,6 +15,86 @@ from transformers import SiglipImageProcessor
 
 from datasets.pretrain.mini_egodex_dataset import MiniEgoDexCollator, MiniEgoDexDataset
 from models.mini_vla_diffusion import MiniVLADiffusionPolicy
+
+
+class EMAModel:
+    """Lightweight EMA state tracker for periodic eval/save."""
+
+    def __init__(
+        self,
+        parameters,
+        *,
+        update_after_step: int = 0,
+        inv_gamma: float = 1.0,
+        power: float = 0.75,
+        min_value: float = 0.0,
+        max_value: float = 0.9999,
+    ):
+        params = list(parameters)
+        self.shadow_params = [p.detach().clone() for p in params]
+        self.update_after_step = int(update_after_step)
+        self.inv_gamma = float(inv_gamma)
+        self.power = float(power)
+        self.min_value = float(min_value)
+        self.max_value = float(max_value)
+        self.optimization_step = 0
+        self.collected_params = None
+
+    def get_decay(self) -> float:
+        step = max(0, self.optimization_step - self.update_after_step - 1)
+        value = 1 - (1 + step / self.inv_gamma) ** (-self.power)
+        if step <= 0:
+            return 0.0
+        return max(self.min_value, min(value, self.max_value))
+
+    @torch.no_grad()
+    def step(self, parameters):
+        params = list(parameters)
+        decay = self.get_decay()
+        one_minus_decay = 1.0 - decay
+        for shadow, param in zip(self.shadow_params, params):
+            if not param.requires_grad:
+                shadow.copy_(param.detach())
+            else:
+                shadow.lerp_(param.detach(), one_minus_decay)
+        self.optimization_step += 1
+
+    @torch.no_grad()
+    def store(self, parameters):
+        self.collected_params = [param.detach().clone() for param in parameters]
+
+    @torch.no_grad()
+    def copy_to(self, parameters):
+        for shadow, param in zip(self.shadow_params, parameters):
+            param.data.copy_(shadow.data)
+
+    @torch.no_grad()
+    def restore(self, parameters):
+        if self.collected_params is None:
+            return
+        for stored, param in zip(self.collected_params, parameters):
+            param.data.copy_(stored.data)
+        self.collected_params = None
+
+    def state_dict(self):
+        return {
+            "shadow_params": [tensor.detach().cpu().clone() for tensor in self.shadow_params],
+            "optimization_step": self.optimization_step,
+            "update_after_step": self.update_after_step,
+            "inv_gamma": self.inv_gamma,
+            "power": self.power,
+            "min_value": self.min_value,
+            "max_value": self.max_value,
+        }
+
+    def load_state_dict(self, state_dict):
+        self.optimization_step = int(state_dict["optimization_step"])
+        self.update_after_step = int(state_dict["update_after_step"])
+        self.inv_gamma = float(state_dict["inv_gamma"])
+        self.power = float(state_dict["power"])
+        self.min_value = float(state_dict["min_value"])
+        self.max_value = float(state_dict["max_value"])
+        self.shadow_params = [tensor.detach().clone() for tensor in state_dict["shadow_params"]]
 
 
 def parse_args():
@@ -82,6 +163,22 @@ def evaluate(accelerator, model, dataloader, weight_dtype):
     if count == 0:
         return {"eval/loss": 0.0, "eval/sample_mse": 0.0}
     return {"eval/loss": loss_sum / count, "eval/sample_mse": sample_mse_sum / count}
+
+
+def save_training_state(accelerator, output_dir, global_step, epoch, ema=None):
+    checkpoint_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
+    accelerator.save_state(checkpoint_dir)
+    if accelerator.is_main_process:
+        torch.save(
+            {
+                "global_step": global_step,
+                "epoch": epoch,
+            },
+            os.path.join(checkpoint_dir, "training_meta.pt"),
+        )
+        if ema is not None:
+            torch.save(ema.state_dict(), os.path.join(checkpoint_dir, "ema_state.pt"))
+    return checkpoint_dir
 
 
 def main():
@@ -190,20 +287,42 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config["train"]["learning_rate"],
+        betas=(config["train"]["adam_beta1"], config["train"]["adam_beta2"]),
         weight_decay=config["train"]["weight_decay"],
     )
+    steps_per_epoch = max(len(train_loader) // config["train"]["gradient_accumulation_steps"], 1)
+    if config["train"]["use_epoch_training"]:
+        total_train_steps = config["train"]["total_epochs"] * steps_per_epoch
+    else:
+        total_train_steps = config["train"]["max_train_steps"]
     lr_scheduler = get_scheduler(
-        "constant_with_warmup",
+        config["train"]["lr_scheduler"],
         optimizer=optimizer,
-        num_warmup_steps=max(config["train"]["max_train_steps"] // 100, 100),
-        num_training_steps=config["train"]["max_train_steps"],
+        num_warmup_steps=config["train"]["lr_warmup_steps"],
+        num_training_steps=max(total_train_steps, 1),
+        num_cycles=config["train"].get("lr_num_cycles", 1),
+        power=config["train"].get("lr_power", 1.0),
     )
 
     model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_loader, val_loader, lr_scheduler
     )
 
+    unwrapped_model = accelerator.unwrap_model(model)
+    ema = None
+    ema_config = config["train"].get("ema", {})
+    if ema_config.get("enabled", False):
+        ema = EMAModel(
+            unwrapped_model.parameters(),
+            update_after_step=ema_config.get("update_after_step", 0),
+            inv_gamma=ema_config.get("inv_gamma", 1.0),
+            power=ema_config.get("power", 0.75),
+            min_value=ema_config.get("min_value", 0.0),
+            max_value=ema_config.get("max_value", 0.9999),
+        )
+
     global_step = 0
+    start_epoch = 0
     if args.resume_from_checkpoint:
         resume_path = args.resume_from_checkpoint
         if resume_path == "latest":
@@ -220,18 +339,31 @@ def main():
         if resume_path is not None:
             accelerator.print(f"Resuming from checkpoint: {resume_path}")
             accelerator.load_state(resume_path)
-            try:
-                global_step = int(os.path.basename(resume_path).split("-")[1])
-            except (IndexError, ValueError):
-                global_step = 0
+            meta_path = os.path.join(resume_path, "training_meta.pt")
+            if os.path.exists(meta_path):
+                meta = torch.load(meta_path, map_location="cpu")
+                global_step = int(meta.get("global_step", 0))
+                start_epoch = int(meta.get("epoch", 0))
+            else:
+                try:
+                    global_step = int(os.path.basename(resume_path).split("-")[1])
+                except (IndexError, ValueError):
+                    global_step = 0
+            if ema is not None:
+                ema_path = os.path.join(resume_path, "ema_state.pt")
+                if os.path.exists(ema_path):
+                    ema.load_state_dict(torch.load(ema_path, map_location="cpu"))
 
     progress_bar = tqdm(
         initial=global_step,
-        total=config["train"]["max_train_steps"],
+        total=total_train_steps,
         disable=not accelerator.is_local_main_process,
         desc="Steps",
     )
-    while global_step < config["train"]["max_train_steps"]:
+    epoch = start_epoch
+    max_epochs = config["train"]["total_epochs"] if config["train"]["use_epoch_training"] else 10**9
+    stop_training = False
+    while not stop_training and epoch < max_epochs:
         for batch in train_loader:
             with accelerator.accumulate(model):
                 states = batch["states"].to(accelerator.device, dtype=weight_dtype)
@@ -261,6 +393,8 @@ def main():
 
             if accelerator.sync_gradients:
                 global_step += 1
+                if ema is not None:
+                    ema.step(accelerator.unwrap_model(model).parameters())
                 progress_bar.update(1)
                 progress_bar.set_postfix(loss=output.loss.detach().item(), lr=lr_scheduler.get_last_lr()[0])
                 accelerator.log(
@@ -272,26 +406,57 @@ def main():
                     step=global_step,
                 )
 
-                if global_step % config["train"]["eval_period"] == 0:
+                do_step_eval = (not config["train"]["use_epoch_training"]) and global_step % config["train"]["eval_period"] == 0
+                if do_step_eval:
+                    if ema is not None:
+                        ema.store(accelerator.unwrap_model(model).parameters())
+                        ema.copy_to(accelerator.unwrap_model(model).parameters())
                     metrics = evaluate(accelerator, model, val_loader, weight_dtype)
+                    if ema is not None:
+                        ema.restore(accelerator.unwrap_model(model).parameters())
                     accelerator.log(metrics, step=global_step)
 
-                if global_step % config["train"]["checkpointing_period"] == 0:
-                    checkpoint_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
-                    accelerator.save_state(checkpoint_dir)
+                do_step_save = (not config["train"]["use_epoch_training"]) and global_step % config["train"]["checkpointing_period"] == 0
+                if do_step_save:
+                    save_training_state(accelerator, output_dir, global_step, epoch, ema=ema)
 
-                if global_step >= config["train"]["max_train_steps"]:
+                if global_step >= total_train_steps:
+                    stop_training = True
                     break
+        epoch += 1
+        if config["train"]["use_epoch_training"]:
+            if config["train"].get("epoch_eval_freq", 0) > 0 and epoch % config["train"]["epoch_eval_freq"] == 0:
+                if ema is not None:
+                    ema.store(accelerator.unwrap_model(model).parameters())
+                    ema.copy_to(accelerator.unwrap_model(model).parameters())
+                metrics = evaluate(accelerator, model, val_loader, weight_dtype)
+                if ema is not None:
+                    ema.restore(accelerator.unwrap_model(model).parameters())
+                accelerator.log(metrics, step=global_step)
+            if config["train"].get("epoch_save_freq", 0) > 0 and (
+                epoch % config["train"]["epoch_save_freq"] == 0 or epoch == config["train"]["total_epochs"]
+            ):
+                save_training_state(accelerator, output_dir, global_step, epoch, ema=ema)
+            if global_step >= total_train_steps:
+                stop_training = True
 
     progress_bar.close()
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
+        save_state_dict = accelerator.unwrap_model(model).state_dict()
+        if ema is not None:
+            ema.store(accelerator.unwrap_model(model).parameters())
+            ema.copy_to(accelerator.unwrap_model(model).parameters())
+            save_state_dict = copy.deepcopy(accelerator.unwrap_model(model).state_dict())
+            ema.restore(accelerator.unwrap_model(model).parameters())
         final_path = os.path.join(output_dir, "mini_vla_final.pt")
         torch.save(
             {
-                "model_state_dict": accelerator.unwrap_model(model).state_dict(),
+                "model_state_dict": save_state_dict,
                 "config": config,
                 "global_step": global_step,
+                "epoch": epoch,
+                "ema_state": ema.state_dict() if ema is not None else None,
             },
             final_path,
         )

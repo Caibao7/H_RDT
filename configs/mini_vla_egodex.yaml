@@ -8,26 +8,26 @@ dataset:
   image_size: 224
   upsample_rate: 3
   stats_path: datasets/pretrain/egodex_stat.json
-  data_root: /path/to/egodex
-  lang_embed_root: null
+  data_root: /root/shared-nvme/egodex
+  lang_embed_root: /root/shared-nvme/egodex_t5_small_embeds
   use_precomp_lang_embed: true
 
 model:
-  obs_cond_dim: 256
+  obs_cond_dim: 384
   num_train_timesteps: 100
   num_inference_steps: 20
-  diffusion_step_embed_dim: 128
-  unet_down_dims: [128, 256, 512]
+  diffusion_step_embed_dim: 256
+  unet_down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
   vision:
-    model_name_or_path: google/siglip-base-patch16-224
+    model_name_or_path: /root/shared-nvme/models/siglip-base-patch16-224
     pretrained: true
     freeze: true
-    num_tokens: 16
+    num_tokens: 24
   text:
     use_online_text_encoder: false
-    model_name_or_path: google-t5/t5-small
+    model_name_or_path: /root/shared-nvme/models/google-t5--t5-small
     pretrained: true
     freeze: true
     max_length: 128
@@ -38,15 +38,32 @@ train:
   logging_dir: logs
   report_to: none
   learning_rate: 0.0001
+  adam_beta1: 0.95
+  adam_beta2: 0.999
   weight_decay: 0.01
-  train_batch_size: 16
-  eval_batch_size: 16
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  lr_num_cycles: 1
+  lr_power: 1.0
+  train_batch_size: 32
+  eval_batch_size: 32
+  use_epoch_training: false
+  total_epochs: 100
   max_train_steps: 100000
   checkpointing_period: 2000
   checkpoints_total_limit: 10
   eval_period: 500
-  num_workers: 8
-  gradient_accumulation_steps: 1
+  epoch_eval_freq: 1
+  epoch_save_freq: 1
+  num_workers: 64
+  gradient_accumulation_steps: 4
   mixed_precision: bf16
   max_grad_norm: 1.0
   seed: 42
+  ema:
+    enabled: true
+    update_after_step: 0
+    inv_gamma: 1.0
+    power: 0.75
+    min_value: 0.0
+    max_value: 0.9999
