@@ -38,9 +38,9 @@ Before training, EgoDex episodes need:
 Use the existing preprocessing scripts:
 
 ```bash
-python datasets/pretrain/precompute_48d_actions.py --data_root /path/to/egodex
-python datasets/pretrain/calc_stat.py --data_root /path/to/egodex
-python datasets/pretrain/encode_lang_batch.py \
+python -m datasets.pretrain.precompute_48d_actions --data_root /path/to/egodex
+python -m datasets.pretrain.calc_stat --data_root /path/to/egodex
+python -m datasets.pretrain.encode_lang_batch \
   --data_root /path/to/egodex \
   --model_path google-t5/t5-small \
   --config_path configs/mini_vla_egodex.yaml \
@@ -81,7 +81,7 @@ Recommended first-run settings:
 Single node, multi-GPU:
 
 ```bash
-accelerate launch --num_processes 4 train/train_mini_vla.py \
+accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
   --data_root /path/to/egodex \
   --output_dir ./checkpoints/mini-egodex
@@ -98,7 +98,7 @@ bash train_mini_egodex.sh
 Resume from a specific checkpoint:
 
 ```bash
-accelerate launch --num_processes 4 train/train_mini_vla.py \
+accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
   --data_root /path/to/egodex \
   --output_dir ./checkpoints/mini-egodex \
@@ -108,7 +108,7 @@ accelerate launch --num_processes 4 train/train_mini_vla.py \
 Resume from the latest checkpoint in `output_dir`:
 
 ```bash
-accelerate launch --num_processes 4 train/train_mini_vla.py \
+accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
   --data_root /path/to/egodex \
   --output_dir ./checkpoints/mini-egodex \
