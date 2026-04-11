@@ -220,6 +220,7 @@ def main():
         with open(os.path.join(output_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
             yaml.safe_dump(config, f, sort_keys=False)
     accelerator.init_trackers("mini-vla-egodex", config=config)
+    logging_steps = max(int(config["train"].get("logging_steps", 1)), 1)
 
     weight_dtype = torch.float32
     if accelerator.mixed_precision == "fp16":
@@ -429,15 +430,16 @@ def main():
                     loss=output.loss.detach().item(),
                     lr=lr_scheduler.get_last_lr()[0],
                 )
-                accelerator.log(
-                    {
-                        "train/loss": output.loss.detach().item(),
-                        "train/diff_loss": output.diff_loss.detach().item(),
-                        "train/lr": lr_scheduler.get_last_lr()[0],
-                        "train/epoch": epoch + 1,
-                    },
-                    step=global_step,
-                )
+                if global_step == 1 or global_step % logging_steps == 0:
+                    accelerator.log(
+                        {
+                            "train/loss": output.loss.detach().item(),
+                            "train/diff_loss": output.diff_loss.detach().item(),
+                            "train/lr": lr_scheduler.get_last_lr()[0],
+                            "train/epoch": epoch + 1,
+                        },
+                        step=global_step,
+                    )
 
                 do_step_eval = (not config["train"]["use_epoch_training"]) and global_step % config["train"]["eval_period"] == 0
                 if do_step_eval:

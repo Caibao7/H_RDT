@@ -66,6 +66,7 @@ Edit [configs/mini_vla_egodex.yaml](/home/caiyy/codefield/VLA/H_RDT/configs/mini
 - `dataset.lang_embed_root`: optional alternate root for precomputed language embeddings
 - `train.output_dir`: checkpoint directory
 - `train.report_to`: `none`, `wandb`, `tensorboard`, or `all`
+- `train.logging_steps`: training metric logging interval in optimizer steps
 - `model.text.use_online_text_encoder`: `false` for cached embeddings during training, `true` to encode raw text online
 
 Recommended first-run settings:
@@ -81,6 +82,7 @@ With the current default config:
 
 - `train.train_batch_size: 8`
 - `train.gradient_accumulation_steps: 4`
+- `train.logging_steps: 100`
 - `num_gpus: 4`
 - Global batch size = `8 * 4 * 4 = 128`
 - `train.num_workers: 4` means 4 DataLoader workers per GPU process, 16 workers total on 4 GPUs

@@ -17,7 +17,7 @@ model:
   num_train_timesteps: 100
   num_inference_steps: 20
   diffusion_step_embed_dim: 256
-  unet_down_dims: [352, 704, 1408, 2816]
+  unet_down_dims: [128, 256, 512, 1024]
   kernel_size: 5
   n_groups: 8
   vision:
@@ -36,6 +36,7 @@ model:
 train:
   output_dir: checkpoints/mini-egodex
   logging_dir: logs
+  logging_steps: 100
   report_to: wandb
   learning_rate: 0.0001
   adam_beta1: 0.95
@@ -45,8 +46,8 @@ train:
   lr_warmup_steps: 500
   lr_num_cycles: 1
   lr_power: 1.0
-  train_batch_size: 8
-  eval_batch_size: 8
+  train_batch_size: 32
+  eval_batch_size: 32
   use_epoch_training: true
   total_epochs: 100
   max_train_steps: 100000
@@ -55,7 +56,7 @@ train:
   eval_period: 500
   epoch_eval_freq: 1
   epoch_save_freq: 1
-  num_workers: 4
+  num_workers: 32
   gradient_accumulation_steps: 4
   mixed_precision: bf16
   max_grad_norm: 1.0
