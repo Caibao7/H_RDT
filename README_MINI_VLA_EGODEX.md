@@ -83,6 +83,7 @@ With the current default config:
 - `train.gradient_accumulation_steps: 4`
 - `num_gpus: 4`
 - Global batch size = `8 * 4 * 4 = 128`
+- `train.num_workers: 4` means 4 DataLoader workers per GPU process, 16 workers total on 4 GPUs
 
 ## Launch
 

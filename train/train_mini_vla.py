@@ -97,6 +97,11 @@ class EMAModel:
         self.shadow_params = [tensor.detach().clone() for tensor in state_dict["shadow_params"]]
 
 
+def log_stage(accelerator: Accelerator, message: str) -> None:
+    if accelerator.is_main_process:
+        print(f"[mini-vla] {message}", flush=True)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a lightweight EgoDex-only VLA diffusion policy.")
     parser.add_argument("--config_path", type=str, default="configs/mini_vla_egodex.yaml")
@@ -205,6 +210,11 @@ def main():
         log_with=report_to,
         project_config=project_config,
     )
+    log_stage(
+        accelerator,
+        "accelerator initialized "
+        f"(processes={accelerator.num_processes}, mixed_precision={accelerator.mixed_precision})",
+    )
     set_seed(config["train"]["seed"])
     if accelerator.is_main_process:
         with open(os.path.join(output_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
@@ -221,6 +231,7 @@ def main():
         config["dataset"]["image_size"],
         config["model"]["vision"]["model_name_or_path"],
     )
+    log_stage(accelerator, "building EgoDex datasets")
     train_dataset = MiniEgoDexDataset(
         data_root=data_root,
         config=config,
@@ -241,8 +252,18 @@ def main():
         stats_path=config["dataset"]["stats_path"],
         lang_embed_root=config["dataset"].get("lang_embed_root"),
     )
+    log_stage(
+        accelerator,
+        f"datasets ready (train={len(train_dataset)}, val={len(val_dataset)})",
+    )
     collator = MiniEgoDexCollator()
 
+    log_stage(
+        accelerator,
+        "building dataloaders "
+        f"(per_gpu_batch={config['train']['train_batch_size']}, "
+        f"workers_per_process={config['train']['num_workers']})",
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=config["train"]["train_batch_size"],
@@ -261,6 +282,7 @@ def main():
         collate_fn=collator,
     )
 
+    log_stage(accelerator, "building model")
     model = MiniVLADiffusionPolicy(
         state_dim=config["common"]["state_dim"],
         action_dim=config["common"]["action_dim"],
@@ -284,6 +306,7 @@ def main():
         num_train_timesteps=config["model"]["num_train_timesteps"],
         num_inference_steps=config["model"]["num_inference_steps"],
     )
+    log_stage(accelerator, "model ready")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -305,9 +328,11 @@ def main():
         power=config["train"].get("lr_power", 1.0),
     )
 
+    log_stage(accelerator, "preparing model, optimizer, dataloaders, and scheduler with accelerate")
     model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_loader, val_loader, lr_scheduler
     )
+    log_stage(accelerator, "accelerate.prepare complete")
 
     unwrapped_model = accelerator.unwrap_model(model)
     ema = None
@@ -364,6 +389,7 @@ def main():
     epoch = start_epoch
     max_epochs = config["train"]["total_epochs"] if config["train"]["use_epoch_training"] else 10**9
     stop_training = False
+    log_stage(accelerator, "starting training loop")
     while not stop_training and epoch < max_epochs:
         for batch in train_loader:
             with accelerator.accumulate(model):
