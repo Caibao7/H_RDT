@@ -165,49 +165,60 @@ class MiniEgoDexDataset(Dataset):
         return torch.stack(frames[-self.img_history_size :], dim=0)
 
     def __getitem__(self, index: int) -> Dict:
-        episode = self.episodes[index]
+        # A tiny fraction of EgoDex files may be corrupt or missing the derived
+        # actions_48d dataset after preprocessing. Replace those samples lazily
+        # instead of failing a long distributed training job.
+        max_attempts = 10
+        last_missing_path = None
+        for attempt in range(max_attempts):
+            sample_index = index if attempt == 0 else random.randrange(len(self.episodes))
+            episode = self.episodes[sample_index]
 
-        with h5py.File(episode["hdf5"], "r") as f:
-            if "actions_48d" not in f:
-                raise ValueError(
-                    f"Missing actions_48d in {episode['hdf5']}. Run datasets/pretrain/precompute_48d_actions.py first."
+            with h5py.File(episode["hdf5"], "r") as f:
+                if "actions_48d" not in f:
+                    last_missing_path = episode["hdf5"]
+                    continue
+
+                all_actions = f["actions_48d"][:].astype(np.float32)
+                total_frames = all_actions.shape[0]
+                max_current = max(total_frames - 2, 0)
+                current_idx = random.randint(0, max_current)
+
+                current_state = all_actions[current_idx : current_idx + 1]
+                future_indices = list(
+                    range(
+                        current_idx + 1,
+                        min(total_frames, current_idx + 1 + self.action_chunk_size * self.upsample_rate),
+                        self.upsample_rate,
+                    )
+                )
+                if not future_indices:
+                    future_indices = [min(current_idx + 1, total_frames - 1)]
+                while len(future_indices) < self.action_chunk_size:
+                    future_indices.append(future_indices[-1])
+
+                future_actions = all_actions[future_indices[: self.action_chunk_size]]
+
+                instruction = self._load_instruction_text(f.attrs)
+                lang_embeds = (
+                    self._load_language_embedding(episode["pt"], f.attrs) if self.use_precomp_lang_embed else None
                 )
 
-            all_actions = f["actions_48d"][:].astype(np.float32)
-            total_frames = all_actions.shape[0]
-            max_current = max(total_frames - 2, 0)
-            current_idx = random.randint(0, max_current)
+            return {
+                "states": torch.from_numpy(self._normalize_action(current_state)),
+                "actions": torch.from_numpy(self._normalize_action(future_actions)),
+                "action_norm": torch.ones(self.action_chunk_size, future_actions.shape[-1], dtype=torch.float32),
+                "images": self._sample_video_frames(episode["mp4"], current_idx),
+                "lang_embeds": lang_embeds,
+                "instruction": instruction,
+                "episode_path": str(episode["hdf5"]),
+                "task": episode["task"],
+            }
 
-            current_state = all_actions[current_idx : current_idx + 1]
-            future_indices = list(
-                range(
-                    current_idx + 1,
-                    min(total_frames, current_idx + 1 + self.action_chunk_size * self.upsample_rate),
-                    self.upsample_rate,
-                )
-            )
-            if not future_indices:
-                future_indices = [min(current_idx + 1, total_frames - 1)]
-            while len(future_indices) < self.action_chunk_size:
-                future_indices.append(future_indices[-1])
-
-            future_actions = all_actions[future_indices[: self.action_chunk_size]]
-
-            instruction = self._load_instruction_text(f.attrs)
-            lang_embeds = (
-                self._load_language_embedding(episode["pt"], f.attrs) if self.use_precomp_lang_embed else None
-            )
-
-        return {
-            "states": torch.from_numpy(self._normalize_action(current_state)),
-            "actions": torch.from_numpy(self._normalize_action(future_actions)),
-            "action_norm": torch.ones(self.action_chunk_size, future_actions.shape[-1], dtype=torch.float32),
-            "images": self._sample_video_frames(episode["mp4"], current_idx),
-            "lang_embeds": lang_embeds,
-            "instruction": instruction,
-            "episode_path": str(episode["hdf5"]),
-            "task": episode["task"],
-        }
+        raise ValueError(
+            f"Failed to sample a valid EgoDex episode after {max_attempts} attempts. "
+            f"Last missing actions_48d file: {last_missing_path}"
+        )
 
 
 class MiniEgoDexCollator:
