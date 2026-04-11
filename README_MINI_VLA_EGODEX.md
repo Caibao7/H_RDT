@@ -90,7 +90,7 @@ With the current default config:
 Single node, 4 GPUs:
 
 ```bash
-accelerate launch --num_processes 4 -m train.train_mini_vla \
+NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=1 accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
   --data_root /root/shared-nvme/egodex \
   --output_dir ./checkpoints/mini-egodex
@@ -101,6 +101,8 @@ Or use the helper script after editing its env vars:
 ```bash
 bash train_mini_egodex.sh
 ```
+
+If it hangs after `preparing model, optimizer, dataloaders, and scheduler with accelerate`, the process is stuck in NCCL/DDP initialization. The default helper script disables InfiniBand and GPU peer-to-peer NCCL paths with `NCCL_IB_DISABLE=1` and `NCCL_P2P_DISABLE=1`, which is usually more reliable inside single-node containers. This is slower than ideal P2P communication, but it is a good stability baseline. After training is stable, you can try removing `NCCL_P2P_DISABLE=1`.
 
 ## Resume
 
