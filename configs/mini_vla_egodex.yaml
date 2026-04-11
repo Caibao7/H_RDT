@@ -17,7 +17,7 @@ model:
   num_train_timesteps: 100
   num_inference_steps: 20
   diffusion_step_embed_dim: 256
-  unet_down_dims: [256, 512, 1024]
+  unet_down_dims: [352, 704, 1408, 2816]
   kernel_size: 5
   n_groups: 8
   vision:
@@ -36,7 +36,7 @@ model:
 train:
   output_dir: checkpoints/mini-egodex
   logging_dir: logs
-  report_to: none
+  report_to: wandb
   learning_rate: 0.0001
   adam_beta1: 0.95
   adam_beta2: 0.999

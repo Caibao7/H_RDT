@@ -398,12 +398,17 @@ def main():
                 if ema is not None:
                     ema.step(accelerator.unwrap_model(model).parameters())
                 progress_bar.update(1)
-                progress_bar.set_postfix(loss=output.loss.detach().item(), lr=lr_scheduler.get_last_lr()[0])
+                progress_bar.set_postfix(
+                    epoch=epoch + 1,
+                    loss=output.loss.detach().item(),
+                    lr=lr_scheduler.get_last_lr()[0],
+                )
                 accelerator.log(
                     {
                         "train/loss": output.loss.detach().item(),
                         "train/diff_loss": output.diff_loss.detach().item(),
                         "train/lr": lr_scheduler.get_last_lr()[0],
+                        "train/epoch": epoch + 1,
                     },
                     step=global_step,
                 )
