@@ -39,7 +39,7 @@ model:
 train:
   output_dir: checkpoints/mini-egodex
   logging_dir: logs
-  logging_steps: 100
+  logging_steps: 200
   report_to: wandb
   learning_rate: 0.0001
   adam_beta1: 0.95
@@ -62,7 +62,7 @@ train:
   eval_sample_actions: false
   epoch_eval_freq: 1
   epoch_save_freq: 1
-  num_workers: 4
+  num_workers: 8
   val_num_workers: 2
   prefetch_factor: 2
   gradient_accumulation_steps: 4
