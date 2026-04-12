@@ -1,6 +1,7 @@
 import os
 import random
 import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -11,6 +12,12 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+
+cv2.setNumThreads(0)
+try:
+    cv2.ocl.setUseOpenCL(False)
+except AttributeError:
+    pass
 
 
 class MiniEgoDexDataset(Dataset):
@@ -38,6 +45,11 @@ class MiniEgoDexDataset(Dataset):
 
         self.action_chunk_size = config["common"]["action_chunk_size"]
         self.img_history_size = config["common"]["img_history_size"]
+        dataset_config = config.get("dataset", {})
+        self.max_lang_cache_items = int(dataset_config.get("max_lang_cache_items", 512))
+        self.max_video_cache_items = int(dataset_config.get("max_video_cache_items", 4))
+        self._lang_cache: OrderedDict[tuple[str, str], torch.Tensor] = OrderedDict()
+        self._video_cache: OrderedDict[str, cv2.VideoCapture] = OrderedDict()
 
         if stats_path is None:
             stats_path = os.path.join(os.path.dirname(__file__), "egodex_stat.json")
@@ -102,15 +114,30 @@ class MiniEgoDexDataset(Dataset):
         normalized = normalized * 2.0 - 1.0
         return np.clip(normalized, -1.0, 1.0).astype(np.float32)
 
-    def _load_language_embedding(self, pt_path: Path, hdf5_attrs) -> torch.Tensor:
-        if not pt_path.exists():
-            raise FileNotFoundError(f"Missing precomputed language embedding: {pt_path}")
+    def _remember_lang_embedding(self, key: tuple[str, str], embedding: torch.Tensor) -> torch.Tensor:
+        if self.max_lang_cache_items <= 0:
+            return embedding
+        self._lang_cache[key] = embedding
+        self._lang_cache.move_to_end(key)
+        while len(self._lang_cache) > self.max_lang_cache_items:
+            self._lang_cache.popitem(last=False)
+        return embedding
 
-        embed_data = torch.load(pt_path, map_location="cpu")
+    def _load_language_embedding(self, pt_path: Path, hdf5_attrs) -> torch.Tensor:
         which = hdf5_attrs.get("which_llm_description", "1")
         if isinstance(which, bytes):
             which = which.decode("utf-8")
         which = str(which)
+        cache_key = (str(pt_path), which)
+        cached = self._lang_cache.get(cache_key)
+        if cached is not None:
+            self._lang_cache.move_to_end(cache_key)
+            return cached
+
+        if not pt_path.exists():
+            raise FileNotFoundError(f"Missing precomputed language embedding: {pt_path}")
+
+        embed_data = torch.load(pt_path, map_location="cpu")
 
         if which == "2" and "embeddings2" in embed_data and embed_data["embeddings2"] is not None:
             embeddings = embed_data["embeddings2"]
@@ -119,7 +146,7 @@ class MiniEgoDexDataset(Dataset):
 
         if embeddings.dim() == 3:
             embeddings = embeddings.squeeze(0)
-        return embeddings.float()
+        return self._remember_lang_embedding(cache_key, embeddings.float())
 
     def _load_instruction_text(self, hdf5_attrs) -> str:
         llm_type = hdf5_attrs.get("llm_type", "")
@@ -139,8 +166,30 @@ class MiniEgoDexDataset(Dataset):
             instruction = instruction.decode("utf-8")
         return str(instruction)
 
+    def _get_video_capture(self, mp4_path: Path) -> tuple[cv2.VideoCapture, bool]:
+        path_key = str(mp4_path)
+        if self.max_video_cache_items <= 0:
+            return cv2.VideoCapture(path_key), True
+
+        cap = self._video_cache.get(path_key)
+        if cap is not None and cap.isOpened():
+            self._video_cache.move_to_end(path_key)
+            return cap, False
+
+        if cap is not None:
+            cap.release()
+            del self._video_cache[path_key]
+
+        cap = cv2.VideoCapture(path_key)
+        self._video_cache[path_key] = cap
+        self._video_cache.move_to_end(path_key)
+        while len(self._video_cache) > self.max_video_cache_items:
+            _, old_cap = self._video_cache.popitem(last=False)
+            old_cap.release()
+        return cap, False
+
     def _sample_video_frames(self, mp4_path: Path, frame_idx: int) -> torch.Tensor:
-        cap = cv2.VideoCapture(str(mp4_path))
+        cap, should_release = self._get_video_capture(mp4_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         start_idx = max(frame_idx - (self.img_history_size - 1) * self.upsample_rate, 0)
 
@@ -154,7 +203,8 @@ class MiniEgoDexDataset(Dataset):
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frame = Image.fromarray(frame)
             frames.append(self.image_transform(frame))
-        cap.release()
+        if should_release:
+            cap.release()
 
         if not frames:
             raise RuntimeError(f"Failed to decode frames from {mp4_path}")
@@ -163,6 +213,10 @@ class MiniEgoDexDataset(Dataset):
             frames.insert(0, frames[0].clone())
 
         return torch.stack(frames[-self.img_history_size :], dim=0)
+
+    def __del__(self):
+        for cap in getattr(self, "_video_cache", {}).values():
+            cap.release()
 
     def __getitem__(self, index: int) -> Dict:
         # A tiny fraction of EgoDex files may be corrupt or missing the derived
@@ -179,12 +233,12 @@ class MiniEgoDexDataset(Dataset):
                     last_missing_path = episode["hdf5"]
                     continue
 
-                all_actions = f["actions_48d"][:].astype(np.float32)
-                total_frames = all_actions.shape[0]
+                actions_ds = f["actions_48d"]
+                total_frames = actions_ds.shape[0]
                 max_current = max(total_frames - 2, 0)
                 current_idx = random.randint(0, max_current)
 
-                current_state = all_actions[current_idx : current_idx + 1]
+                current_state = actions_ds[current_idx : current_idx + 1].astype(np.float32)
                 future_indices = list(
                     range(
                         current_idx + 1,
@@ -197,7 +251,10 @@ class MiniEgoDexDataset(Dataset):
                 while len(future_indices) < self.action_chunk_size:
                     future_indices.append(future_indices[-1])
 
-                future_actions = all_actions[future_indices[: self.action_chunk_size]]
+                future_actions = np.stack(
+                    [actions_ds[future_idx].astype(np.float32) for future_idx in future_indices[: self.action_chunk_size]],
+                    axis=0,
+                )
 
                 instruction = self._load_instruction_text(f.attrs)
                 lang_embeds = (

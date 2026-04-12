@@ -264,6 +264,7 @@ class MiniVLADiffusionPolicy(nn.Module):
         text_max_length: int = 128,
         precomputed_text_dim: int = 4096,
         use_online_text_encoder: bool = True,
+        unet_global_cond_dim: Optional[int] = None,
         diffusion_step_embed_dim: int = 128,
         unet_down_dims=(128, 256, 512),
         kernel_size: int = 5,
@@ -278,6 +279,8 @@ class MiniVLADiffusionPolicy(nn.Module):
         self.image_history_size = image_history_size
         self.use_online_text_encoder = use_online_text_encoder
         self.num_inference_steps = num_inference_steps
+        self.vision_freeze = vision_freeze
+        self.text_freeze = text_freeze
 
         self.vision_encoder = SiglipVisionEncoder(
             model_name_or_path=vision_model_name_or_path,
@@ -301,10 +304,21 @@ class MiniVLADiffusionPolicy(nn.Module):
         self.text_proj = nn.Linear(text_input_dim, obs_cond_dim)
         self.state_proj = nn.Linear(state_dim, obs_cond_dim)
 
-        global_cond_dim = image_history_size * vision_num_tokens * obs_cond_dim + obs_cond_dim + obs_cond_dim
+        raw_global_cond_dim = image_history_size * vision_num_tokens * obs_cond_dim + obs_cond_dim + obs_cond_dim
+        if unet_global_cond_dim is None:
+            unet_global_cond_dim = raw_global_cond_dim
+        self.global_cond_proj = (
+            nn.Identity()
+            if unet_global_cond_dim == raw_global_cond_dim
+            else nn.Sequential(
+                nn.Linear(raw_global_cond_dim, unet_global_cond_dim),
+                nn.Mish(),
+                nn.Linear(unet_global_cond_dim, unet_global_cond_dim),
+            )
+        )
         self.noise_pred_net = ConditionalUnet1D(
             input_dim=action_dim,
-            global_cond_dim=global_cond_dim,
+            global_cond_dim=unet_global_cond_dim,
             diffusion_step_embed_dim=diffusion_step_embed_dim,
             down_dims=unet_down_dims,
             kernel_size=kernel_size,
@@ -316,6 +330,14 @@ class MiniVLADiffusionPolicy(nn.Module):
             clip_sample=True,
             prediction_type="epsilon",
         )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.vision_freeze:
+            self.vision_encoder.eval()
+        if self.text_encoder is not None and self.text_freeze:
+            self.text_encoder.eval()
+        return self
 
     def _encode_obs(
         self,
@@ -348,7 +370,7 @@ class MiniVLADiffusionPolicy(nn.Module):
             pooled = masked.sum(dim=1) / lang_attn_mask.sum(dim=1, keepdim=True).clamp_min(1)
 
         text_token = self.text_proj(pooled)
-        return torch.cat([vision_tokens, state_token, text_token], dim=-1)
+        return self.global_cond_proj(torch.cat([vision_tokens, state_token, text_token], dim=-1))
 
     def compute_loss(
         self,

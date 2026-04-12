@@ -71,8 +71,9 @@ Edit [configs/mini_vla_egodex.yaml](/home/caiyy/codefield/VLA/H_RDT/configs/mini
 
 Recommended first-run settings:
 
-- `model.obs_cond_dim: 384`
-- `model.unet_down_dims: [256, 512, 1024]`
+- `model.obs_cond_dim: 512`
+- `model.unet_global_cond_dim: 4096`
+- `model.unet_down_dims: [256, 512, 1024, 2048]`
 - `common.action_chunk_size: 8`
 - `dataset.image_size: 224`
 - `train.train_batch_size`: per-GPU batch size
@@ -80,19 +81,21 @@ Recommended first-run settings:
 
 With the current default config:
 
-- `train.train_batch_size: 8`
+- `train.train_batch_size: 32`
 - `train.gradient_accumulation_steps: 4`
 - `train.logging_steps: 100`
 - `num_gpus: 4`
-- Global batch size = `8 * 4 * 4 = 128`
+- Global batch size = `32 * 4 * 4 = 512`
 - `train.num_workers: 4` means 4 DataLoader workers per GPU process, 16 workers total on 4 GPUs
+- `train.max_eval_batches: 16` limits full validation passes during training
+- `train.eval_sample_actions: false` avoids running the 20-step sampler during every validation
 
 ## Launch
 
 Single node, 4 GPUs:
 
 ```bash
-NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=1 accelerate launch --num_processes 4 -m train.train_mini_vla \
+NCCL_IB_DISABLE=1 NCCL_P2P_DISABLE=0 accelerate launch --num_processes 4 -m train.train_mini_vla \
   --config_path configs/mini_vla_egodex.yaml \
   --data_root /root/shared-nvme/egodex \
   --output_dir ./checkpoints/mini-egodex
@@ -104,7 +107,7 @@ Or use the helper script after editing its env vars:
 bash train_mini_egodex.sh
 ```
 
-If it hangs after `preparing model, optimizer, dataloaders, and scheduler with accelerate`, the process is stuck in NCCL/DDP initialization. The default helper script disables InfiniBand and GPU peer-to-peer NCCL paths with `NCCL_IB_DISABLE=1` and `NCCL_P2P_DISABLE=1`, which is usually more reliable inside single-node containers. This is slower than ideal P2P communication, but it is a good stability baseline. After training is stable, you can try removing `NCCL_P2P_DISABLE=1`.
+If it hangs after `preparing model, optimizer, dataloaders, and scheduler with accelerate`, the process is stuck in NCCL/DDP initialization. The helper script disables InfiniBand by default with `NCCL_IB_DISABLE=1`, but keeps GPU peer-to-peer enabled with `NCCL_P2P_DISABLE=0` because disabling P2P can make four-GPU training slower than single-GPU training. If your container still hangs, rerun with `NCCL_P2P_DISABLE=1 bash train_mini_egodex.sh` as a stability fallback.
 
 ## Resume
 
@@ -117,6 +120,8 @@ accelerate launch --num_processes 4 -m train.train_mini_vla \
   --output_dir ./checkpoints/mini-egodex \
   --resume_from_checkpoint ./checkpoints/mini-egodex/checkpoint-2000
 ```
+
+When a checkpoint contains `resolved_config.yaml`, resume will rebuild the model, optimizer, scheduler, dataloaders, and EMA using that checkpoint's saved training config before loading state. This keeps architectural settings such as `obs_cond_dim`, `unet_global_cond_dim`, `unet_down_dims`, batch size, scheduler, and precision consistent with the original run. `--data_root`, `--output_dir`, and `--report_to` remain runtime overrides.
 
 Resume from the latest checkpoint in `output_dir`:
 
