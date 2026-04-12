@@ -86,7 +86,9 @@ With the current default config:
 - `train.logging_steps: 100`
 - `num_gpus: 4`
 - Global batch size = `32 * 4 * 4 = 512`
-- `train.num_workers: 4` means 4 DataLoader workers per GPU process, 16 workers total on 4 GPUs
+- `train.num_workers: 12` is the single-GPU data-loading baseline; reduce it for multi-GPU
+- `train.prefetch_factor: 4` lets each worker prepare more batches ahead
+- `train.dataloader_in_order: false` avoids one slow video/HDF5 sample blocking ready batches
 - `train.max_eval_batches: 16` limits full validation passes during training
 - `train.eval_sample_actions: false` avoids running the 20-step sampler during every validation
 

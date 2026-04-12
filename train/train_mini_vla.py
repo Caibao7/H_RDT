@@ -378,6 +378,7 @@ def main():
         "shuffle": True,
         "num_workers": train_num_workers,
         "pin_memory": True,
+        "drop_last": config["train"].get("drop_last", False),
         "collate_fn": collator,
     }
     if train_num_workers > 0:
@@ -385,6 +386,7 @@ def main():
             {
                 "persistent_workers": True,
                 "prefetch_factor": int(config["train"].get("prefetch_factor", 2)),
+                "in_order": bool(config["train"].get("dataloader_in_order", True)),
                 "worker_init_fn": dataloader_worker_init_fn,
             }
         )
@@ -396,6 +398,7 @@ def main():
         "shuffle": False,
         "num_workers": val_num_workers,
         "pin_memory": True,
+        "drop_last": False,
         "collate_fn": collator,
     }
     if val_num_workers > 0:
@@ -403,6 +406,7 @@ def main():
             {
                 "persistent_workers": True,
                 "prefetch_factor": int(config["train"].get("prefetch_factor", 2)),
+                "in_order": True,
                 "worker_init_fn": dataloader_worker_init_fn,
             }
         )
