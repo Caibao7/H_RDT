@@ -283,6 +283,12 @@ def main():
         config["train"]["report_to"] = args.report_to
     if report_to == "none":
         report_to = None
+    config["runtime"] = {
+        "config_path": args.config_path,
+        "resume_from_checkpoint": args.resume_from_checkpoint,
+        "resolved_resume_path": resume_path,
+        "checkpoint_config_path": checkpoint_config_path,
+    }
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     logging_dir = os.path.join(output_dir, config["train"].get("logging_dir", "logs"))
     project_config = ProjectConfiguration(
@@ -301,6 +307,8 @@ def main():
         "accelerator initialized "
         f"(processes={accelerator.num_processes}, mixed_precision={accelerator.mixed_precision})",
     )
+    config["runtime"]["num_processes"] = accelerator.num_processes
+    config["runtime"]["mixed_precision"] = accelerator.mixed_precision
     if resume_path is not None:
         if checkpoint_config_path is not None:
             log_stage(accelerator, f"using checkpoint config: {checkpoint_config_path}")
