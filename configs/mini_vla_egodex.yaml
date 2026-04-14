@@ -62,9 +62,9 @@ train:
   eval_sample_actions: false
   epoch_eval_freq: 1
   epoch_save_freq: 1
-  num_workers: 12
+  num_workers: 64
   val_num_workers: 2
-  prefetch_factor: 4
+  prefetch_factor: 16
   dataloader_in_order: false
   drop_last: true
   gradient_accumulation_steps: 4
