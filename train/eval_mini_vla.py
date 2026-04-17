@@ -23,6 +23,8 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint-* dir or mini_vla_final.pt.")
     parser.add_argument("--config_path", type=str, default="configs/mini_vla_egodex.yaml")
     parser.add_argument("--data_root", type=str, default=None)
+    parser.add_argument("--vision_model_path", type=str, default=None)
+    parser.add_argument("--text_model_path", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--max_eval_batches", type=int, default=None, help="Use <=0 to evaluate the full test split.")
@@ -143,6 +145,10 @@ def main():
     config = load_eval_config(args.checkpoint, args.config_path)
     if args.data_root is not None:
         config["dataset"]["data_root"] = args.data_root
+    if args.vision_model_path is not None:
+        config["model"]["vision"]["model_name_or_path"] = args.vision_model_path
+    if args.text_model_path is not None:
+        config["model"]["text"]["model_name_or_path"] = args.text_model_path
     if args.batch_size is not None:
         config["train"]["eval_batch_size"] = args.batch_size
     if args.num_workers is not None:
