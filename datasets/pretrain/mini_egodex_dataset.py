@@ -48,8 +48,12 @@ class MiniEgoDexDataset(Dataset):
         dataset_config = config.get("dataset", {})
         self.max_lang_cache_items = int(dataset_config.get("max_lang_cache_items", 512))
         self.max_video_cache_items = int(dataset_config.get("max_video_cache_items", 4))
+        self.max_sample_attempts = int(dataset_config.get("max_sample_attempts", 32))
+        self.max_skip_warnings = int(dataset_config.get("max_skip_warnings", 20))
         self._lang_cache: OrderedDict[tuple[str, str], torch.Tensor] = OrderedDict()
         self._video_cache: OrderedDict[str, cv2.VideoCapture] = OrderedDict()
+        self._bad_episode_indices: set[int] = set()
+        self._skip_warning_count = 0
 
         if stats_path is None:
             stats_path = os.path.join(os.path.dirname(__file__), "egodex_stat.json")
@@ -188,31 +192,53 @@ class MiniEgoDexDataset(Dataset):
             old_cap.release()
         return cap, False
 
-    def _sample_video_frames(self, mp4_path: Path, frame_idx: int) -> torch.Tensor:
-        cap, should_release = self._get_video_capture(mp4_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        start_idx = max(frame_idx - (self.img_history_size - 1) * self.upsample_rate, 0)
-
-        frames: List[torch.Tensor] = []
-        for idx in range(start_idx, frame_idx + 1, self.upsample_rate):
-            idx = min(idx, max(total_frames - 1, 0))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ok, frame = cap.read()
-            if not ok:
-                break
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = Image.fromarray(frame)
-            frames.append(self.image_transform(frame))
-        if should_release:
+    def _forget_video_capture(self, mp4_path: Path) -> None:
+        cap = self._video_cache.pop(str(mp4_path), None)
+        if cap is not None:
             cap.release()
 
+    def _sample_video_frames(self, mp4_path: Path, frame_idx: int) -> torch.Tensor:
+        cap, should_release = self._get_video_capture(mp4_path)
+        try:
+            if not cap.isOpened():
+                raise RuntimeError(f"Failed to open video: {mp4_path}")
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0:
+                raise RuntimeError(f"Video has no decodable frames: {mp4_path}")
+            start_idx = max(frame_idx - (self.img_history_size - 1) * self.upsample_rate, 0)
+
+            frames: List[torch.Tensor] = []
+            for idx in range(start_idx, frame_idx + 1, self.upsample_rate):
+                idx = min(idx, max(total_frames - 1, 0))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = Image.fromarray(frame)
+                frames.append(self.image_transform(frame))
+        finally:
+            if should_release:
+                cap.release()
+
         if not frames:
+            self._forget_video_capture(mp4_path)
             raise RuntimeError(f"Failed to decode frames from {mp4_path}")
 
         while len(frames) < self.img_history_size:
             frames.insert(0, frames[0].clone())
 
         return torch.stack(frames[-self.img_history_size :], dim=0)
+
+    def _warn_skip_episode(self, episode: Dict[str, Path], error: Exception) -> None:
+        if self.max_skip_warnings <= 0 or self._skip_warning_count >= self.max_skip_warnings:
+            return
+        self._skip_warning_count += 1
+        print(
+            "Skipping EgoDex episode after data read failure "
+            f"(hdf5={episode['hdf5']}, mp4={episode['mp4']}): {type(error).__name__}: {error}",
+            flush=True,
+        )
 
     def __del__(self):
         for cap in getattr(self, "_video_cache", {}).values():
@@ -222,59 +248,77 @@ class MiniEgoDexDataset(Dataset):
         # A tiny fraction of EgoDex files may be corrupt or missing the derived
         # actions_48d dataset after preprocessing. Replace those samples lazily
         # instead of failing a long distributed training job.
-        max_attempts = 10
-        last_missing_path = None
+        max_attempts = max(self.max_sample_attempts, 1)
+        last_error = None
+        last_episode = None
         for attempt in range(max_attempts):
-            sample_index = index if attempt == 0 else random.randrange(len(self.episodes))
+            if attempt == 0 and index not in self._bad_episode_indices:
+                sample_index = index
+            else:
+                sample_index = random.randrange(len(self.episodes))
+                for _ in range(8):
+                    if sample_index not in self._bad_episode_indices:
+                        break
+                    sample_index = random.randrange(len(self.episodes))
             episode = self.episodes[sample_index]
+            try:
+                with h5py.File(episode["hdf5"], "r") as f:
+                    if "actions_48d" not in f:
+                        raise KeyError("missing actions_48d")
 
-            with h5py.File(episode["hdf5"], "r") as f:
-                if "actions_48d" not in f:
-                    last_missing_path = episode["hdf5"]
-                    continue
+                    actions_ds = f["actions_48d"]
+                    total_frames = actions_ds.shape[0]
+                    if total_frames <= 1:
+                        raise ValueError(f"not enough frames in actions_48d: {total_frames}")
+                    max_current = max(total_frames - 2, 0)
+                    current_idx = random.randint(0, max_current)
 
-                actions_ds = f["actions_48d"]
-                total_frames = actions_ds.shape[0]
-                max_current = max(total_frames - 2, 0)
-                current_idx = random.randint(0, max_current)
-
-                current_state = actions_ds[current_idx : current_idx + 1].astype(np.float32)
-                future_indices = list(
-                    range(
-                        current_idx + 1,
-                        min(total_frames, current_idx + 1 + self.action_chunk_size * self.upsample_rate),
-                        self.upsample_rate,
+                    current_state = actions_ds[current_idx : current_idx + 1].astype(np.float32)
+                    future_indices = list(
+                        range(
+                            current_idx + 1,
+                            min(total_frames, current_idx + 1 + self.action_chunk_size * self.upsample_rate),
+                            self.upsample_rate,
+                        )
                     )
-                )
-                if not future_indices:
-                    future_indices = [min(current_idx + 1, total_frames - 1)]
-                while len(future_indices) < self.action_chunk_size:
-                    future_indices.append(future_indices[-1])
+                    if not future_indices:
+                        future_indices = [min(current_idx + 1, total_frames - 1)]
+                    while len(future_indices) < self.action_chunk_size:
+                        future_indices.append(future_indices[-1])
 
-                future_actions = np.stack(
-                    [actions_ds[future_idx].astype(np.float32) for future_idx in future_indices[: self.action_chunk_size]],
-                    axis=0,
-                )
+                    future_actions = np.stack(
+                        [
+                            actions_ds[future_idx].astype(np.float32)
+                            for future_idx in future_indices[: self.action_chunk_size]
+                        ],
+                        axis=0,
+                    )
 
-                instruction = self._load_instruction_text(f.attrs)
-                lang_embeds = (
-                    self._load_language_embedding(episode["pt"], f.attrs) if self.use_precomp_lang_embed else None
-                )
+                    instruction = self._load_instruction_text(f.attrs)
+                    lang_embeds = (
+                        self._load_language_embedding(episode["pt"], f.attrs) if self.use_precomp_lang_embed else None
+                    )
 
-            return {
-                "states": torch.from_numpy(self._normalize_action(current_state)),
-                "actions": torch.from_numpy(self._normalize_action(future_actions)),
-                "action_norm": torch.ones(self.action_chunk_size, future_actions.shape[-1], dtype=torch.float32),
-                "images": self._sample_video_frames(episode["mp4"], current_idx),
-                "lang_embeds": lang_embeds,
-                "instruction": instruction,
-                "episode_path": str(episode["hdf5"]),
-                "task": episode["task"],
-            }
+                return {
+                    "states": torch.from_numpy(self._normalize_action(current_state)),
+                    "actions": torch.from_numpy(self._normalize_action(future_actions)),
+                    "action_norm": torch.ones(self.action_chunk_size, future_actions.shape[-1], dtype=torch.float32),
+                    "images": self._sample_video_frames(episode["mp4"], current_idx),
+                    "lang_embeds": lang_embeds,
+                    "instruction": instruction,
+                    "episode_path": str(episode["hdf5"]),
+                    "task": episode["task"],
+                }
+            except (OSError, RuntimeError, KeyError, ValueError, FileNotFoundError, EOFError) as error:
+                last_error = error
+                last_episode = episode
+                self._bad_episode_indices.add(sample_index)
+                self._warn_skip_episode(episode, error)
+                continue
 
         raise ValueError(
             f"Failed to sample a valid EgoDex episode after {max_attempts} attempts. "
-            f"Last missing actions_48d file: {last_missing_path}"
+            f"Last failed episode: {last_episode}. Last error: {last_error}"
         )
 
 

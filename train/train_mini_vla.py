@@ -134,6 +134,9 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     parser.add_argument("--report_to", type=str, default=None)
+    parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--val_num_workers", type=int, default=None)
+    parser.add_argument("--prefetch_factor", type=int, default=None)
     return parser.parse_args()
 
 
@@ -281,6 +284,15 @@ def main():
     config["train"]["output_dir"] = output_dir
     if args.report_to is not None:
         config["train"]["report_to"] = args.report_to
+    if args.num_workers is not None:
+        config["train"]["num_workers"] = args.num_workers
+    if args.val_num_workers is not None:
+        config["train"]["val_num_workers"] = args.val_num_workers
+    if args.prefetch_factor is not None:
+        config["train"]["prefetch_factor"] = args.prefetch_factor
+    config.setdefault("dataset", {})
+    config["dataset"].setdefault("max_sample_attempts", 32)
+    config["dataset"].setdefault("max_skip_warnings", 20)
     if report_to == "none":
         report_to = None
     config["runtime"] = {
