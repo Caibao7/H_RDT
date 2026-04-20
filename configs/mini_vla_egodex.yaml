@@ -6,13 +6,15 @@ common:
 
 dataset:
   image_size: 224
-  upsample_rate: 3
+  upsample_rate: 1
   stats_path: datasets/pretrain/egodex_stat.json
   data_root: /root/shared-nvme/egodex
   lang_embed_root: /root/shared-nvme/egodex_t5_small_embeds
-  use_precomp_lang_embed: true
+  use_precomp_lang_embed: false
   max_lang_cache_items: 512
   max_video_cache_items: 4
+  max_sample_attempts: 32
+  max_skip_warnings: 20
 
 model:
   obs_cond_dim: 512
@@ -29,7 +31,7 @@ model:
     freeze: true
     num_tokens: 24
   text:
-    use_online_text_encoder: false
+    use_online_text_encoder: true
     model_name_or_path: /root/shared-nvme/models/google-t5--t5-small
     pretrained: true
     freeze: true
@@ -59,7 +61,7 @@ train:
   checkpoints_total_limit: 10
   eval_period: 500
   max_eval_batches: 16
-  eval_sample_actions: false
+  eval_sample_actions: true
   epoch_eval_freq: 1
   epoch_save_freq: 1
   num_workers: 64
