@@ -31,7 +31,56 @@ import yaml
 from PIL import Image
 
 
-HAND_WM_ROOT = Path("/home/caiyy/codefield/VLA/hand-wm")
+DEFAULT_WM_CHECKPOINT_REL = Path("checkpoints/step_000160000")
+
+
+def default_hand_wm_root() -> Path:
+    env_root = os.environ.get("HAND_WM_ROOT")
+    if env_root:
+        return Path(env_root)
+    return Path(__file__).resolve().parent.parent / "hand-wm"
+
+
+def has_world_model_package(path: Path) -> bool:
+    return (path / "src/world_model_eval/world_model.py").exists()
+
+
+def infer_hand_wm_root(hand_wm_root: Path | None, wm_checkpoint: Path | None) -> Path:
+    candidates: list[Path] = []
+    if hand_wm_root is not None:
+        candidates.append(hand_wm_root)
+
+    env_root = os.environ.get("HAND_WM_ROOT")
+    if env_root:
+        candidates.append(Path(env_root))
+
+    if wm_checkpoint is not None:
+        checkpoint_path = wm_checkpoint.expanduser()
+        candidates.extend([checkpoint_path, *checkpoint_path.parents])
+
+    hrdt_root = Path(__file__).resolve().parent
+    candidates.extend(
+        [
+            hrdt_root.parent / "hand-wm",
+            Path.cwd().parent / "hand-wm",
+        ]
+    )
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.expanduser()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if has_world_model_package(candidate):
+            return candidate
+
+    fallback = candidates[0].expanduser() if candidates else default_hand_wm_root()
+    raise FileNotFoundError(
+        "Could not locate hand-wm. Pass --hand_wm_root /path/to/hand-wm "
+        f"or set HAND_WM_ROOT. Checked: {[str(path) for path in seen]}. "
+        f"First fallback would be: {fallback}"
+    )
 
 
 @dataclass
@@ -55,8 +104,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Roll out Mini VLA actions in an EgoDex-trained hand world model."
     )
-    parser.add_argument("--hand_wm_root", type=Path, default=HAND_WM_ROOT)
-    parser.add_argument("--wm_checkpoint", type=Path, default=HAND_WM_ROOT / "checkpoints/step_000160000")
+    parser.add_argument(
+        "--hand_wm_root",
+        type=Path,
+        default=None,
+        help="Path to hand-wm repo. Defaults to HAND_WM_ROOT, sibling ../hand-wm, or inferred from --wm_checkpoint.",
+    )
+    parser.add_argument("--wm_checkpoint", type=Path, default=None)
     parser.add_argument("--mini_checkpoint", type=Path, default=Path("checkpoints/mini-egodex-rate1-chunk8/checkpoint-102063"))
     parser.add_argument("--mini_config", type=Path, default=Path("configs/mini_vla_egodex.yaml"))
     parser.add_argument("--no_mini_ema", action="store_true", help="Do not apply EMA weights when loading Mini VLA.")
@@ -116,6 +170,13 @@ def import_hand_world_model(hand_wm_root: Path):
     from world_model import WorldModel  # type: ignore
 
     return WorldModel
+
+
+def resolve_runtime_paths(args: argparse.Namespace) -> argparse.Namespace:
+    args.hand_wm_root = infer_hand_wm_root(args.hand_wm_root, args.wm_checkpoint)
+    if args.wm_checkpoint is None:
+        args.wm_checkpoint = args.hand_wm_root / DEFAULT_WM_CHECKPOINT_REL
+    return args
 
 
 def collect_egodex_episodes(data_root: Path, split: str) -> list[dict[str, Path | str]]:
@@ -335,7 +396,7 @@ def prepare_world_model(args: argparse.Namespace):
 
 
 def main() -> None:
-    args = parse_args()
+    args = resolve_runtime_paths(parse_args())
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -367,6 +428,7 @@ def main() -> None:
         "rollout_steps": args.rollout_steps,
         "mini_checkpoint": str(args.mini_checkpoint),
         "wm_checkpoint": str(args.wm_checkpoint),
+        "hand_wm_root": str(args.hand_wm_root),
         "wm_config": asdict(
             HandWorldModelConfig(
                 device=args.device,
