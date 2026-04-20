@@ -180,10 +180,26 @@ def patch_hand_wm_vae(vae_model_path: Path) -> None:
             f"Missing: {vae_config}"
         )
 
+    with open(vae_config, "r", encoding="utf-8") as f:
+        vae_config_data = json.load(f)
+
     import vae as hand_vae_module  # type: ignore
     from diffusers.models import AutoencoderKL
 
     vae_class = hand_vae_module.VAE
+
+    def make_conv_identity(conv: torch.nn.Module) -> None:
+        if not isinstance(conv, torch.nn.Conv2d):
+            return
+        if conv.kernel_size != (1, 1):
+            return
+        with torch.no_grad():
+            conv.weight.zero_()
+            out_channels, in_channels = conv.weight.shape[:2]
+            for idx in range(min(out_channels, in_channels)):
+                conv.weight[idx, idx, 0, 0] = 1.0
+            if conv.bias is not None:
+                conv.bias.zero_()
 
     def local_vae_init(self):
         torch.nn.Module.__init__(self)
@@ -191,7 +207,18 @@ def patch_hand_wm_vae(vae_model_path: Path) -> None:
             str(vae_model_path),
             subfolder="vae",
             local_files_only=True,
+            low_cpu_mem_usage=False,
+            device_map=None,
         )
+        # diffusers==0.27 does not understand SD3 VAE's
+        # use_quant_conv/use_post_quant_conv=False config keys. It therefore
+        # creates these layers even though newer diffusers treats them as
+        # disabled. Identity 1x1 convs preserve the intended disabled behavior.
+        make_conv_identity(getattr(self.vae, "quant_conv", None))
+        make_conv_identity(getattr(self.vae, "post_quant_conv", None))
+
+        if "shift_factor" in vae_config_data and not hasattr(self.vae.config, "shift_factor"):
+            self.vae.register_to_config(shift_factor=float(vae_config_data["shift_factor"]))
         self.vae.eval().requires_grad_(False)
 
     vae_class.__init__ = local_vae_init
