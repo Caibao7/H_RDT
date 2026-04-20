@@ -16,6 +16,9 @@ then five fingertip xyz positions.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import copy
+import io
 import json
 import os
 import sys
@@ -123,6 +126,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mini_checkpoint", type=Path, default=Path("checkpoints/mini-egodex-rate1-chunk8/checkpoint-102063"))
     parser.add_argument("--mini_config", type=Path, default=Path("configs/mini_vla_egodex.yaml"))
+    parser.add_argument("--mini_vision_model_path", type=Path, default=None)
+    parser.add_argument("--mini_text_model_path", type=Path, default=None)
+    parser.add_argument("--mini_lang_embed_root", type=Path, default=None)
+    parser.add_argument("--mini_num_inference_steps", type=int, default=None)
     parser.add_argument("--no_mini_ema", action="store_true", help="Do not apply EMA weights when loading Mini VLA.")
 
     parser.add_argument("--data_root", type=Path, default=Path("/root/shared-nvme/egodex"))
@@ -164,8 +171,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wm_cfg", type=float, default=1.0)
     parser.add_argument("--wm_chunk_size", type=int, default=1)
     parser.add_argument("--disable_kv_cache", action="store_true")
+    parser.add_argument(
+        "--quiet_wm_logs",
+        action="store_true",
+        help="Suppress debug prints emitted inside hand-wm generate_chunk during long rollouts.",
+    )
 
     parser.add_argument("--output_dir", type=Path, default=Path("rollouts/mini_vla_world_model_smoke"))
+    parser.add_argument("--save_gt_video", action="store_true")
+    parser.add_argument("--save_side_by_side", action="store_true")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry_run", action="store_true", help="Build inputs and metadata without loading models.")
@@ -326,6 +340,19 @@ def load_mini_config(checkpoint: Path, config_path: Path) -> dict[str, Any]:
     return load_yaml_config(config_path)
 
 
+def apply_mini_config_overrides(args: argparse.Namespace, mini_config: dict[str, Any]) -> dict[str, Any]:
+    mini_config = copy.deepcopy(mini_config)
+    if args.mini_vision_model_path is not None:
+        mini_config["model"]["vision"]["model_name_or_path"] = str(args.mini_vision_model_path)
+    if args.mini_text_model_path is not None:
+        mini_config["model"]["text"]["model_name_or_path"] = str(args.mini_text_model_path)
+    if args.mini_lang_embed_root is not None:
+        mini_config["dataset"]["lang_embed_root"] = str(args.mini_lang_embed_root)
+    if args.mini_num_inference_steps is not None:
+        mini_config["model"]["num_inference_steps"] = args.mini_num_inference_steps
+    return mini_config
+
+
 def minmax_normalize(action: np.ndarray | torch.Tensor, action_min: np.ndarray, action_max: np.ndarray):
     is_tensor = torch.is_tensor(action)
     if is_tensor:
@@ -365,6 +392,44 @@ def load_actions_and_instruction(hdf5_path: Path) -> tuple[np.ndarray, str]:
     return actions, str(instruction)
 
 
+def resolve_episode_lang_embed_path(hdf5_path: Path, data_root: Path, lang_embed_root: str | None) -> Path:
+    if lang_embed_root:
+        try:
+            relative_task_dir = hdf5_path.parent.relative_to(data_root)
+        except ValueError:
+            relative_task_dir = Path(hdf5_path.parent.name)
+        return Path(lang_embed_root) / relative_task_dir / f"{hdf5_path.stem}.pt"
+    return hdf5_path.with_suffix(".pt")
+
+
+def load_episode_lang_tokens(
+    hdf5_path: Path,
+    data_root: Path,
+    lang_embed_root: str | None,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    pt_path = resolve_episode_lang_embed_path(hdf5_path, data_root, lang_embed_root)
+    if not pt_path.exists():
+        raise FileNotFoundError(f"Missing precomputed Mini VLA language embedding: {pt_path}")
+
+    with h5py.File(hdf5_path, "r") as f:
+        which = f.attrs.get("which_llm_description", "1")
+        if isinstance(which, bytes):
+            which = which.decode("utf-8")
+        which = str(which)
+
+    embed_data = torch.load(pt_path, map_location="cpu")
+    if which == "2" and embed_data.get("embeddings2") is not None:
+        embeddings = embed_data["embeddings2"]
+    else:
+        embeddings = embed_data["embeddings"]
+    if embeddings.dim() == 3:
+        embeddings = embeddings.squeeze(0)
+    lang_tokens = embeddings.float().unsqueeze(0).to(device)
+    lang_attn_mask = torch.ones(lang_tokens.shape[:2], dtype=torch.bool, device=device)
+    return lang_tokens, lang_attn_mask
+
+
 def read_rgb_frame(mp4_path: Path, frame_idx: int) -> np.ndarray:
     cap = cv2.VideoCapture(str(mp4_path))
     try:
@@ -383,6 +448,29 @@ def read_rgb_frame(mp4_path: Path, frame_idx: int) -> np.ndarray:
         cap.release()
 
 
+def read_rgb_frame_sequence(mp4_path: Path, start_idx: int, count: int) -> list[np.ndarray]:
+    if count <= 0:
+        return []
+    cap = cv2.VideoCapture(str(mp4_path))
+    frames: list[np.ndarray] = []
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open video: {mp4_path}")
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            raise RuntimeError(f"Video has no decodable frames: {mp4_path}")
+        start_idx = min(max(start_idx, 0), total_frames - 1)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
+        for _ in range(count):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    finally:
+        cap.release()
+    return frames
+
+
 def center_square_resize(frame_rgb: np.ndarray, image_size: int) -> np.ndarray:
     image = Image.fromarray(frame_rgb)
     width, height = image.size
@@ -395,7 +483,7 @@ def center_square_resize(frame_rgb: np.ndarray, image_size: int) -> np.ndarray:
 
 def frame_to_world_tensor(frame_rgb: np.ndarray, image_size: int, device: str) -> torch.Tensor:
     frame = center_square_resize(frame_rgb, image_size)
-    tensor = torch.from_numpy(frame).float() / 255.0
+    tensor = torch.from_numpy(frame.copy()).float() / 255.0
     return tensor.unsqueeze(0).to(device)
 
 
@@ -423,6 +511,34 @@ def save_mp4(frames_rgb: Iterable[np.ndarray], path: Path, fps: int) -> None:
             writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     finally:
         writer.release()
+
+
+def make_labeled_side_by_side_frames(
+    left_frames: list[np.ndarray],
+    right_frames: list[np.ndarray],
+    left_label: str,
+    right_label: str,
+) -> list[np.ndarray]:
+    count = min(len(left_frames), len(right_frames))
+    frames: list[np.ndarray] = []
+    for left, right in zip(left_frames[:count], right_frames[:count]):
+        if left.shape[:2] != right.shape[:2]:
+            right = cv2.resize(right, (left.shape[1], left.shape[0]), interpolation=cv2.INTER_AREA)
+        combined = np.concatenate([left, right], axis=1)
+        label_bar = np.full((28, combined.shape[1], 3), 255, dtype=np.uint8)
+        cv2.putText(label_bar, left_label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(
+            label_bar,
+            right_label,
+            (left.shape[1] + 8, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 0, 0),
+            1,
+            cv2.LINE_AA,
+        )
+        frames.append(np.concatenate([label_bar, combined], axis=0))
+    return frames
 
 
 def action_dim_names() -> list[str]:
@@ -488,7 +604,7 @@ def main() -> None:
     if args.start_idx < 0 or args.start_idx >= actions_raw.shape[0] - 1:
         raise IndexError(f"start_idx={args.start_idx} invalid for {actions_raw.shape[0]} action frames")
 
-    mini_config = load_mini_config(args.mini_checkpoint, args.mini_config)
+    mini_config = apply_mini_config_overrides(args, load_mini_config(args.mini_checkpoint, args.mini_config))
     stats_path = mini_config["dataset"]["stats_path"]
     action_min, action_max = load_egodex_stats(stats_path)
 
@@ -502,10 +618,21 @@ def main() -> None:
         "wm_action_space": args.wm_action_space,
         "start_idx": args.start_idx,
         "rollout_steps": args.rollout_steps,
+        "policy_replan_every": args.policy_replan_every,
+        "quiet_wm_logs": args.quiet_wm_logs,
+        "save_gt_video": args.save_gt_video,
+        "save_side_by_side": args.save_side_by_side,
         "mini_checkpoint": str(args.mini_checkpoint),
         "wm_checkpoint": str(args.wm_checkpoint),
         "hand_wm_root": str(args.hand_wm_root),
         "vae_model_path": str(args.vae_model_path) if args.vae_model_path else None,
+        "mini_config_runtime": {
+            "vision_model_name_or_path": mini_config["model"]["vision"]["model_name_or_path"],
+            "text_model_name_or_path": mini_config["model"]["text"]["model_name_or_path"],
+            "use_online_text_encoder": mini_config["model"]["text"]["use_online_text_encoder"],
+            "num_inference_steps": mini_config["model"]["num_inference_steps"],
+            "lang_embed_root": mini_config["dataset"].get("lang_embed_root"),
+        },
         "wm_config": asdict(
             HandWorldModelConfig(
                 device=args.device,
@@ -533,6 +660,8 @@ def main() -> None:
 
     mini_policy = None
     mini_image_transform = None
+    mini_lang_tokens = None
+    mini_lang_attn_mask = None
     if args.action_source == "mini":
         from train.train_mini_vla import build_image_transform
 
@@ -541,6 +670,13 @@ def main() -> None:
             mini_config["dataset"]["image_size"],
             mini_config["model"]["vision"]["model_name_or_path"],
         )
+        if not mini_config["model"]["text"]["use_online_text_encoder"]:
+            mini_lang_tokens, mini_lang_attn_mask = load_episode_lang_tokens(
+                hdf5_path,
+                args.data_root,
+                mini_config["dataset"].get("lang_embed_root"),
+                args.device,
+            )
 
     world_model, wm_config = prepare_world_model(args)
     world_model.model.eval()
@@ -577,6 +713,8 @@ def main() -> None:
                     planned_actions_norm = mini_policy.sample_actions(
                         states=current_state_norm,
                         images=image_tensor,
+                        lang_tokens=mini_lang_tokens,
+                        lang_attn_mask=mini_lang_attn_mask,
                         instructions=[instruction],
                     )
                     plan_offset = 0
@@ -586,7 +724,11 @@ def main() -> None:
 
             wm_action = action_raw if args.wm_action_space == "raw" else action_norm
             generated_any = False
-            for frame_idx, decoded in world_model.generate_chunk(wm_action):
+            wm_stdout = io.StringIO() if args.quiet_wm_logs else None
+            stdout_context = contextlib.redirect_stdout(wm_stdout) if wm_stdout is not None else contextlib.nullcontext()
+            with stdout_context:
+                generated = list(world_model.generate_chunk(wm_action))
+            for frame_idx, decoded in generated:
                 generated_any = True
                 frame = decoded[0, 0].detach().float().clamp(0, 1).cpu()
                 frame_np = (frame.numpy() * 255.0).astype(np.uint8)
@@ -615,6 +757,26 @@ def main() -> None:
         json.dump(metadata, f, indent=2)
 
     save_mp4(output_frames, args.output_dir / "rollout.mp4", fps=args.fps)
+    if args.save_gt_video or args.save_side_by_side:
+        gt_frames_raw = read_rgb_frame_sequence(mp4_path, args.start_idx, len(output_frames))
+        gt_frames = [center_square_resize(frame, wm_config.image_size) for frame in gt_frames_raw]
+        if len(gt_frames) != len(output_frames):
+            print(
+                f"Warning: GT comparison has {len(gt_frames)} frames but rollout has {len(output_frames)} frames.",
+                flush=True,
+            )
+        if args.save_gt_video and gt_frames:
+            save_mp4(gt_frames, args.output_dir / "ground_truth.mp4", fps=args.fps)
+            print(f"Saved ground-truth video: {args.output_dir / 'ground_truth.mp4'}")
+        if args.save_side_by_side and gt_frames:
+            side_by_side_frames = make_labeled_side_by_side_frames(
+                gt_frames,
+                output_frames,
+                "GT video",
+                f"WM rollout ({args.action_source})",
+            )
+            save_mp4(side_by_side_frames, args.output_dir / "gt_vs_rollout.mp4", fps=args.fps)
+            print(f"Saved side-by-side video: {args.output_dir / 'gt_vs_rollout.mp4'}")
     print(f"Saved rollout video: {args.output_dir / 'rollout.mp4'}")
     print(f"Saved metadata: {args.output_dir / 'metadata.json'}")
 

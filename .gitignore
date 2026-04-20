@@ -181,3 +181,5 @@ test_*.py
 
 checkpoints/*
 bak/*
+
+rollouts/*
