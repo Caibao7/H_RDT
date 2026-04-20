@@ -111,6 +111,15 @@ def parse_args() -> argparse.Namespace:
         help="Path to hand-wm repo. Defaults to HAND_WM_ROOT, sibling ../hand-wm, or inferred from --wm_checkpoint.",
     )
     parser.add_argument("--wm_checkpoint", type=Path, default=None)
+    parser.add_argument(
+        "--vae_model_path",
+        type=Path,
+        default=None,
+        help=(
+            "Local diffusers directory for stabilityai/stable-diffusion-3-medium-diffusers. "
+            "When set, the hand-wm VAE is loaded from this path with subfolder='vae' and local_files_only=True."
+        ),
+    )
     parser.add_argument("--mini_checkpoint", type=Path, default=Path("checkpoints/mini-egodex-rate1-chunk8/checkpoint-102063"))
     parser.add_argument("--mini_config", type=Path, default=Path("configs/mini_vla_egodex.yaml"))
     parser.add_argument("--no_mini_ema", action="store_true", help="Do not apply EMA weights when loading Mini VLA.")
@@ -162,7 +171,33 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_hand_world_model(hand_wm_root: Path):
+def patch_hand_wm_vae(vae_model_path: Path) -> None:
+    vae_model_path = vae_model_path.expanduser().resolve()
+    vae_config = vae_model_path / "vae" / "config.json"
+    if not vae_config.exists():
+        raise FileNotFoundError(
+            f"--vae_model_path must point to a diffusers repo directory containing vae/config.json. "
+            f"Missing: {vae_config}"
+        )
+
+    import vae as hand_vae_module  # type: ignore
+    from diffusers.models import AutoencoderKL
+
+    vae_class = hand_vae_module.VAE
+
+    def local_vae_init(self):
+        torch.nn.Module.__init__(self)
+        self.vae = AutoencoderKL.from_pretrained(
+            str(vae_model_path),
+            subfolder="vae",
+            local_files_only=True,
+        )
+        self.vae.eval().requires_grad_(False)
+
+    vae_class.__init__ = local_vae_init
+
+
+def import_hand_world_model(hand_wm_root: Path, vae_model_path: Path | None = None):
     eval_dir = hand_wm_root / "src/world_model_eval"
     if not eval_dir.exists():
         raise FileNotFoundError(f"hand-wm world_model_eval directory not found: {eval_dir}")
@@ -178,6 +213,9 @@ def import_hand_world_model(hand_wm_root: Path):
             "`einops` and a compatible `diffusers`; full hand-wm setup is "
             "`pip install -e /path/to/hand-wm`."
         ) from error
+
+    if vae_model_path is not None:
+        patch_hand_wm_vae(vae_model_path)
 
     return WorldModel
 
@@ -383,7 +421,7 @@ def load_mini_policy(args: argparse.Namespace, mini_config: dict[str, Any]):
 
 
 def prepare_world_model(args: argparse.Namespace):
-    WorldModel = import_hand_world_model(args.hand_wm_root)
+    WorldModel = import_hand_world_model(args.hand_wm_root, args.vae_model_path)
     config = HandWorldModelConfig(
         device=args.device,
         n_frames=args.wm_n_frames,
@@ -439,6 +477,7 @@ def main() -> None:
         "mini_checkpoint": str(args.mini_checkpoint),
         "wm_checkpoint": str(args.wm_checkpoint),
         "hand_wm_root": str(args.hand_wm_root),
+        "vae_model_path": str(args.vae_model_path) if args.vae_model_path else None,
         "wm_config": asdict(
             HandWorldModelConfig(
                 device=args.device,
