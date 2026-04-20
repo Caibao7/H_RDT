@@ -29,6 +29,7 @@ import numpy as np
 import torch
 import yaml
 from PIL import Image
+from tqdm.auto import tqdm
 
 
 DEFAULT_WM_CHECKPOINT_REL = Path("checkpoints/step_000160000")
@@ -559,6 +560,7 @@ def main() -> None:
     plan_offset = 0
 
     with torch.no_grad():
+        progress = tqdm(total=args.rollout_steps, desc="Rolling out", unit="frame")
         for step in range(args.rollout_steps):
             src_frame_idx = args.start_idx + step + 1
             if src_frame_idx >= actions_raw.shape[0]:
@@ -604,6 +606,8 @@ def main() -> None:
                     "action_norm_first8": action_norm[0, :8].detach().cpu().tolist(),
                 }
             )
+            progress.update(1)
+        progress.close()
 
     metadata["actual_rollout_steps"] = len(rollout_actions)
     metadata["rollout_actions"] = rollout_actions
