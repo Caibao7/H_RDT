@@ -167,7 +167,17 @@ def import_hand_world_model(hand_wm_root: Path):
     if not eval_dir.exists():
         raise FileNotFoundError(f"hand-wm world_model_eval directory not found: {eval_dir}")
     sys.path.insert(0, str(eval_dir))
-    from world_model import WorldModel  # type: ignore
+    try:
+        from world_model import WorldModel  # type: ignore
+    except ModuleNotFoundError as error:
+        missing = error.name or str(error)
+        raise ModuleNotFoundError(
+            f"Missing dependency while importing hand-wm: {missing!r}. "
+            "Install the hand-wm runtime dependencies into the active Python env. "
+            "For this rollout script the minimal expected packages are usually "
+            "`einops` and a compatible `diffusers`; full hand-wm setup is "
+            "`pip install -e /path/to/hand-wm`."
+        ) from error
 
     return WorldModel
 
